@@ -1,8 +1,8 @@
 # 📄 技术文档：Navidrome 播放源重定向（WebDAV / 115 直链）
 
 > 基线：`navidrome/navidrome` v0.64.2-22-g95f67d2c
-> 上游改动：5 个文件 +40 / -6；新增 2 个文件（`core/stream/source.go` 405 行、`core/stream/ps115.go` 152 行）
-> 一键重放：仓库根目录 `navidrome-diy.sh`（896 行，幂等，可反复执行）
+> 上游改动：5 个文件 +48 / -6；新增 2 个文件（`core/stream/source.go` 405 行、`core/stream/ps115.go` 173 行）
+> 一键重放：[chas0000/navidrome-diy](https://github.com/chas0000/navidrome-diy) 的 `navidrome-diy.sh`（幂等，可反复执行）
 
 ---
 

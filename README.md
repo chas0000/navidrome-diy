@@ -59,7 +59,7 @@ make docker-image IMAGE_PLATFORMS=linux/amd64 DOCKER_TAG=navidrome:test
 
 ## 补丁做了什么
 
-上游改动 **5 个文件 +40 / -6**，新增 2 个文件（上游不存在，永不冲突）：
+上游改动 **5 个文件 +48 / -6**，新增 2 个文件（上游不存在，永不冲突）：
 
 | 文件 | 改动 |
 |---|---|
