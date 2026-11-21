@@ -73,6 +73,31 @@ make docker-image IMAGE_PLATFORMS=linux/amd64 DOCKER_TAG=navidrome:test
 
 细节、验证数据、故障排查见 [docs/playback-redirect.md](docs/playback-redirect.md)。
 
+## 预构建镜像（GitHub Actions）
+
+仓库带一个 workflow，把补丁打到上游指定版本上、构建镜像并推到 **GitHub Container Registry**（不推 Docker Hub）。
+
+```bash
+docker pull ghcr.io/chas0000/navidrome-diy:latest
+```
+
+标签规则：
+
+| 触发 | 标签 |
+|---|---|
+| push 到 `main` | `latest`、`sha-<短 sha>` |
+| 打 tag `v1.0.0` | `v1.0.0`、`sha-<短 sha>` |
+| 手动触发（可指定上游版本/平台） | `upstream-<ref>`、`sha-<短 sha>` |
+
+手动构建别的上游版本或多平台：
+
+```bash
+gh workflow run build-image -f upstream_ref=v0.64.2 -f platforms=linux/amd64,linux/arm64
+```
+
+> 首次推送后，GHCR 的包默认是 **private**，需要在仓库右侧 `Packages` → 包设置里把可见性改成 public，
+> 否则别人 `docker pull` 会 403。
+
 ## 上游更新后
 
 ```bash

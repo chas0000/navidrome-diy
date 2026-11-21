@@ -1,0 +1,118 @@
+name: build-image
+
+# 把补丁打到上游指定版本上，构建镜像并推到 GitHub Container Registry。
+# 不推 Docker Hub。
+#
+# 手动触发时可以指定上游版本：
+#   gh workflow run build-image -f upstream_ref=v0.64.2
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 上游 Navidrome 的 tag / 分支 / commit
+        required: true
+        default: v0.64.2
+      platforms:
+        description: 目标平台（多平台用逗号分隔）
+        required: true
+        default: linux/amd64
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REPO: navidrome/navidrome
+  # push 触发时用的基线版本；改这里跟着上游走
+  UPSTREAM_REF: v0.64.2
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 取出本仓库（补丁脚本）
+        uses: actions/checkout@v4
+
+      - name: 取出上游源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ inputs.upstream_ref || env.UPSTREAM_REF }}
+          path: upstream
+          fetch-depth: 1
+
+      - name: 应用补丁
+        run: |
+          cp navidrome-diy.sh upstream/
+          cd upstream
+          chmod +x navidrome-diy.sh
+          # --no-build：这里没有生成 ui/build，Go 自检会失败；
+          # 真正的编译验证由下面的 docker build 完成
+          ./navidrome-diy.sh --no-build
+          echo "--- 补丁后的改动 ---"
+          git diff --stat -- '*.go'
+
+      - name: 校验补丁确实生效
+        run: |
+          set -e
+          test -f upstream/core/stream/source.go
+          test -f upstream/core/stream/ps115.go
+          grep -q 'resolveSource(ctx, mf)' upstream/core/stream/media_streamer.go
+          grep -q 'PS115Mode' upstream/conf/configuration.go
+          grep -q 'mediaContentType(s.format)' upstream/core/stream/media_streamer.go
+          echo "补丁校验通过"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short,prefix=sha-
+            type=raw,value=upstream-${{ inputs.upstream_ref || env.UPSTREAM_REF }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: upstream
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_TAG=${{ inputs.upstream_ref || env.UPSTREAM_REF }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 汇总
+        run: |
+          {
+            echo "### 镜像已推送"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
