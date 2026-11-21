@@ -95,8 +95,8 @@ docker pull ghcr.io/chas0000/navidrome-diy:latest
 gh workflow run build-image -f upstream_ref=v0.64.2 -f platforms=linux/amd64,linux/arm64
 ```
 
-> 首次推送后，GHCR 的包默认是 **private**，需要在仓库右侧 `Packages` → 包设置里把可见性改成 public，
-> 否则别人 `docker pull` 会 403。
+> GHCR 的包默认可能是 **private**，需要在 `Packages` → 包设置里把可见性改成 public，否则别人
+> `docker pull` 会 403。本仓库的 `navidrome-diy` 包已设为 public，可以直接拉。
 
 ## 上游更新后
 
