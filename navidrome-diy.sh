@@ -92,24 +92,18 @@ const (
 )
 
 // resolveSource returns where the bytes of mf actually live at playback time.
-// It returns either a local filesystem path or an http(s) URL.
+// It returns either a local filesystem path or an http(s) WebDAV URL.
+//
+// The signed 115 CDN link is deliberately NOT resolved here. Fetching that link
+// server-side would send the server's User-Agent to 115, which does not match the
+// one used to sign/request it. The CDN link is only resolved in the raw streaming
+// path, where it is handed to the client as a 302 so the client fetches the bytes
+// with its own User-Agent. If that is not possible, playback falls back to this
+// WebDAV source (Basic auth, no UA coupling) and the server reads the bytes here.
 func resolveSource(ctx context.Context, mf *model.MediaFile) string {
 	if conf.Server.EnablePathOverride && len(conf.Server.PathOverride) > 0 {
 		if base, ok := conf.Server.PathOverride[mf.LibraryPath]; ok && strings.TrimSpace(base) != "" {
 			target := joinSource(base, mf.Path)
-			// Direct-link mode: resolve the 115 CDN URL here so every downstream
-			// consumer (stream, transcode, probe) sees a plain http source.
-			// On any failure we silently keep the WebDAV URL.
-			// Both modes need the signed URL; on failure we keep the WebDAV one.
-			if isRemoteSource(target) {
-				if link, err := ps115DirectURL(ctx, target); err == nil {
-					ps115LogResolution(ctx, mf.ID, mf.Path, link)
-					return link
-				} else {
-					log.Warn(ctx, "ps115 direct link unavailable, using WebDAV", "id", mf.ID,
-						"relativePath", mf.Path, "error", err)
-				}
-			}
 			log.Debug(ctx, "Playback source overridden", "id", mf.ID,
 				"libraryPath", mf.LibraryPath, "relativePath", mf.Path, "source", RedactURL(target))
 			return target
@@ -469,30 +463,21 @@ import (
 	"sync"
 	"time"
 
-	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/log"
 )
 
-// This file implements the "direct link" playback modes.
+// This file implements the "direct link" playback path.
 //
-// PS115Mode selects what the client receives at playback time:
-//
-//	"relay"    - the signed 115 CDN URL is fetched by the server and relayed (default)
-//	"redirect" - the signed 115 CDN URL is handed to the client with a 302
+// The signed 115 CDN URL is only ever handed to the client as a 302, so the
+// client fetches the bytes with its own User-Agent. Fetching that URL on the
+// server would send a different User-Agent than the one used to request it.
+// If the link cannot be resolved, playback falls back to the plain WebDAV URL,
+// which the server reads directly (Basic auth, no User-Agent coupling).
 //
 // The CDN URL is obtained the same way a player would: ask the WebDAV endpoint for
 // the file, follow its redirect to ps2115, and read the Location ps2115 answers with.
 // Only the WebDAV/HTTP interface is used - ps2115's index database is never opened,
 // so its files are never locked or touched.
-//
-// Any failure falls back to the plain WebDAV URL, which the server then relays
-// directly, so a broken setup degrades in speed instead of breaking playback.
-
-const (
-	ps115ModeWebDAV   = "webdav"
-	ps115ModeProxy    = "proxy"
-	ps115ModeRedirect = "redirect"
-)
 
 // mediaContentType maps an audio suffix to the type the player expects to see on
 // the redirect response itself.
@@ -530,16 +515,6 @@ var ps115Cache = struct {
 	sync.Mutex
 	urls map[string]ps115Link
 }{urls: map[string]ps115Link{}}
-
-// ps115Mode returns the configured playback mode, defaulting to WebDAV relay.
-func ps115Mode() string {
-	switch m := strings.ToLower(strings.TrimSpace(conf.Server.PS115Mode)); m {
-	case ps115ModeProxy, ps115ModeRedirect:
-		return m
-	default:
-		return ps115ModeWebDAV
-	}
-}
 
 // ps115Client only inspects redirects: every hop is read for its Location header,
 // and the CDN is never contacted from here.
@@ -715,19 +690,32 @@ if "redirectURL string" not in s:
                   "\tio.ReadCloser", 1)
 check("redirectURL string" in s, "Stream 增加 redirectURL 字段", "media_streamer.go 未找到 Stream 结构体锚点")
 
-# 6) raw 分支：redirect 模式直接 302
-if "ps115ModeRedirect" not in s:
+# 6) raw 分支：先解析 115 直链做 302，失败回落 WebDAV（服务器永不拿直链字节）
+if "ps115DirectURL(ctx, filePath)" not in s:
     s = s.replace("\t\tf, err := OpenSource(ctx, filePath)",
-                  "\t\tif ps115Mode() == ps115ModeRedirect && isRemoteSource(filePath) {\n"
-                  "\t\t\t// Hand the signed 115 URL to the client; we never touch the bytes.\n"
-                  "\t\t\tlog.Debug(ctx, \"Redirecting client to 115 direct link\", \"id\", mf.ID, \"url\", RedactURL(filePath))\n"
-                  "\t\t\ts.redirectURL = filePath\n"
-                  "\t\t\ts.ReadCloser = http.NoBody\n"
-                  "\t\t\ts.format = mf.Suffix\n"
-                  "\t\t\treturn s, nil\n"
+                  "\t\t// The signed 115 CDN link must only ever be fetched by the client: the\n"
+                  "\t\t// server's User-Agent does not match the one used to request the link.\n"
+                  "\t\t// Resolve it here and hand it to the client as a 302. If it cannot be\n"
+                  "\t\t// resolved, fall back to the WebDAV source (Basic auth, no UA coupling)\n"
+                  "\t\t// and let the server read the bytes from there.\n"
+                  "\t\tif isRemoteSource(filePath) {\n"
+                  "\t\t\tlink, err := ps115DirectURL(ctx, filePath)\n"
+                  "\t\t\tif err != nil {\n"
+                  "\t\t\t\tlog.Warn(ctx, \"ps115 direct link unavailable, using WebDAV\", \"id\", mf.ID,\n"
+                  "\t\t\t\t\t\"relativePath\", mf.Path, \"error\", err)\n"
+                  "\t\t\t} else {\n"
+                  "\t\t\t\tps115LogResolution(ctx, mf.ID, mf.Path, link)\n"
+                  "\t\t\t\tlog.Debug(ctx, \"Redirecting client to 115 direct link\", \"id\", mf.ID, \"url\", RedactURL(link))\n"
+                  "\t\t\t\ts.redirectURL = link\n"
+                  "\t\t\t\ts.ReadCloser = http.NoBody\n"
+                  "\t\t\t\ts.format = mf.Suffix\n"
+                  "\t\t\t\treturn s, nil\n"
+                  "\t\t\t}\n"
                   "\t\t}\n"
                   "\t\tf, err := OpenSource(ctx, filePath)", 1)
-check("ps115ModeRedirect" in s, "raw 分支支持 302", "media_streamer.go 未找到 OpenSource 锚点")
+check("ps115DirectURL(ctx, filePath)" in s,
+      "raw 分支先解析直链做 302，失败回落 WebDAV",
+      "media_streamer.go 未找到 OpenSource 锚点（直链 302 注入失败）")
 
 # 6b) Serve 处理 302
 if "mediaContentType(s.format)" not in s:
@@ -767,10 +755,10 @@ FIELDS = (
     "\t// Values may be a local directory or a webdav:// URL.\n"
     "\tEnablePathOverride bool\n"
     "\tPathOverride       map[string]string\n"
-    "\t// Playback source mode:\n"
-    "\t//   \"relay\"    - resolve the signed 115 CDN URL and relay the bytes (default)\n"
-    "\t//   \"redirect\" - resolve the signed 115 CDN URL and 302 the client to it\n"
-    "\t// Resolution failures fall back to the plain WebDAV URL.\n"
+    "\t// PS115Mode is kept for config compatibility but is no longer used:\n"
+    "\t// raw playback always tries the signed 115 CDN link as a 302 first (so the\n"
+    "\t// client fetches it with its own User-Agent) and falls back to the WebDAV\n"
+    "\t// source on the server when the link cannot be resolved.\n"
     "\tPS115Mode string"
 )
 
@@ -915,11 +903,14 @@ echo "   [PathOverride]"
 echo '   "/music"        = "/mnt/ssd/music"                              # 映射到本地目录'
 echo '   "/music-remote" = "webdav://user:pass@192.168.1.10:5005/dav"   # 播放走 WebDAV'
 echo ""
-echo "   （可选）低码率请求由本机转码；原始音质由服务器转发"
-echo "         请求原始音质时 302 直连上游（115 等签名 CDN）；请求低码率仍本机转码。"
-echo "         上游不跳转、或最终地址需要凭据时自动回退为转发。"
+echo "   播放取字节策略（raw 原始音质）："
+echo "         先解析 115 签名直链，成功则 302 交给客户端，由客户端用自己的 UA 取字节；"
+echo "         解析失败（拿不到直链）则回落 WebDAV，由服务器从 WebDAV 读取字节。"
+echo "         服务器永远不主动请求 115 CDN 直链，避免 UA 不一致被拒。"
+echo "         低码率转码请求始终由服务器取字节（走映射目标/直链的 spool），不受影响。"
 echo ""
 echo "   说明：扫描/入库/封面/歌单仍读原库路径，只有播放取字节走映射目标。"
 echo "         webdav:// = http，webdavs:// = https，仅支持 Basic 认证。"
+echo "         PS115Mode 配置项保留兼容但已不再生效（无需设置）。"
 echo ""
 echo "💡 备份文件保存在原目录，后缀 .backup.${TS}"
